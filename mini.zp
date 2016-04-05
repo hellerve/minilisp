@@ -83,6 +83,7 @@
        ((eq? op 'if) (state:make-state (eval-if sexp env) env))
        ((eq? op 'cond) (eval-sexp (zapply cond->if sexp) env))
        ((eq? op 'let) (eval-sexp (zapply let->fn sexp) env))
+       ((eq? op 'quote) (state:make-state operands env))
        ((eq? op 'fn)
           (let ((params (map ->string (car operands)))
                 (body (cadr operands)))
