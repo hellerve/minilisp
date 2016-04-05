@@ -1,0 +1,125 @@
+(define zapply apply)
+
+(define (map-to-hash f m)
+  (make-hash (hash:kv-map (lambda (kv) (cons (car kv) (f (cadr kv)))) m)))
+
+(define (die . msgs)
+  (zapply error msgs)
+  (exit 1))
+
+(define bools {TRUE FALSE})
+
+(define (self-evaluating? sexp)
+  (or (number? sexp)
+      (in? bools sexp)))
+
+(define (true? sexp)
+  (not (eq? 'FALSE sexp)))
+
+(define (eval-if body env)
+  (let ((pred (cadr body))
+        (conseq (caddr body))
+        (alt (cadddr body)))
+    (if (true? (leval pred env))
+      (leval conseq env)
+      (if (nil? alt)
+        'NIL
+        (leval alt env)))))
+
+(define (eval-let body env)
+  (let ((binds (car body))
+        (body (cadr body)))
+    (leval body (hash:merge env
+                           (map-to-hash (lambda (v) (leval v env))
+                                        (zapply make-hash binds))))))
+
+(define make-if
+  (case-lambda
+    ((pred consequence) (list 'if pred consequence))
+    ((pred consequence alternative) (list 'if pred consequence alternative))))
+
+(define (make-fn params body) (list 'fn params body))
+
+(define (pairs->if pred consequence . pairs)
+  (if (nil? pairs)
+    (make-if pred consequence)
+    (make-if pred consequence (zapply pairs->if pairs))))
+
+(define (cond->if _ . pairs)
+  (zapply pairs->if pairs))
+
+(define (let->fn _ bindings body)
+  (let ((params (take-nth 2 bindings))
+        (args (take-nth 2 (tail bindings))))
+    (cons (make-fn params body) args)))
+
+(define-struct state (result env))
+
+(define-struct proc (params body env name))
+
+(define (eval-sexp sexp env)
+  (cond
+   ((self-evaluating? sexp) (state:make-state sexp env))
+   ((primitive-procedure-name? sexp) (state:make-state (primitive-procedure-map (->string sexp)) env))
+   ((symbol? sexp) (state:make-state (env (->string sexp)) env))
+
+   ((list? sexp)
+    (let ((op (car sexp))
+          (operands (cdr sexp)))
+     (cond
+       ((eq? op 'def)
+          (state:make-state 'NIL
+               (let* ((name (car operands))
+                      (exp (cadr operands))
+                      (value (leval exp env)))
+                 (hash:set env (->string name) value))))
+       ((eq? op 'defn)
+          (state:make-state 'NIL
+               (let* ((name (->string (car operands)))
+                      (params (map ->string (cadr operands)))
+                      (body (caddr operands))
+                      (new-fn (proc:make-proc params body env name)))
+                 (hash:set env (->string name) new-fn))))
+       ((eq? op 'if) (state:make-state (eval-if sexp env) env))
+       ((eq? op 'cond) (eval-sexp (zapply cond->if sexp) env))
+       ((eq? op 'let) (eval-sexp (zapply let->fn sexp) env))
+       ((eq? op 'fn)
+          (let ((params (map ->string (car operands)))
+                (body (cadr operands)))
+            (state:make-state (proc:make-proc params body env (nil)) env)))
+       (else
+        (state:make-state (lapply (leval op env) (map (lambda (opd) (leval opd env)) operands))
+                          env)))))
+   (else (error "EVAL FAIL: " sexp))))
+
+(define leval
+  (case-lambda
+    ((sexp) (leval sexp #{}))
+    ((sexp env) (state:get-result (eval-sexp sexp env)))))
+
+(define (next-state last-state sexp)
+  (let ((env (state:get-env last-state)))
+    (eval-sexp sexp env)))
+
+(define initial-state (state:make-state 'NIL #{}))
+
+(define (eval-program sexps) (state:get-result (reduce next-state initial-state sexps)))
+
+(define primitive-procedure-map
+          (make-hash "+" + "-" - "*" * "/" /
+                     "=" (lambda args (if (zapply = args) 'TRUE 'FALSE))
+                     "square" (lambda (x) (* x x))
+                     "sqrt" sqrt))
+
+(define primitive-procedure-name? (lambda (x) (hash:contains? primitive-procedure-map (->string x))))
+(define primitive-procedure? (lambda (x) (in? (hash:values primitive-procedure-map) x)))
+
+(define (lapply proc args)
+  (cond
+   ((primitive-procedure? proc) (zapply proc args))
+   ((proc:proc? proc) (leval (proc:get-body proc)
+                             (hash:merge
+                               (hash:merge (proc:get-env proc)
+                                           (make-hash (proc:get-name proc) proc))
+                               (make-hash (zip (proc:get-params proc) args)))))
+   (else (error "APPLY FAIL: " proc args))))
